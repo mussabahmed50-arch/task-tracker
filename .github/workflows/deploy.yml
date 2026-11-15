@@ -1,0 +1,67 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Never run two deployments at the same time
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # ---------- Job 1: check the code ----------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Backend - install and check syntax
+        working-directory: backend
+        run: |
+          npm ci
+          node --check src/server.js
+          node --check src/db.js
+
+      - name: Frontend - install, lint and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+  # ---------- Job 2: deploy to EC2 ----------
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy on the server
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" << 'EOF'
+            set -e
+            cd ~/task-tracker
+            git pull origin main
+            docker compose up -d --build
+            docker image prune -f
+          EOF
+
+      - name: Health check
+        run: |
+          curl -fsS --retry 10 --retry-delay 6 --retry-all-errors \
+            "http://${{ secrets.SERVER_HOST }}/api/health"
